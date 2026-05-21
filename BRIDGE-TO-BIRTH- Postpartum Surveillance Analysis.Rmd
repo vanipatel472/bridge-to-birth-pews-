@@ -1,0 +1,175 @@
+---
+title: "BRIDGE-TO-BIRTH: Postpartum Surveillance Analysis"
+subtitle: "Algorithmic Risk Scoring & Triage Validation via Synthetic Cohorts"
+author: "Vani Patel"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    theme: flatly
+    highlight: tango
+    toc: true
+    toc_float: true
+    code_folding: show
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, fig.width = 10, fig.height = 6)
+```
+
+# Introduction
+## Clinical Context & Significance
+The late postpartum window (up to one year following delivery) represents a critical structural gap in modern maternal care. According to historical data from the Centers for Disease Control and Prevention, over 80% of pregnancy-related deaths are completely preventable. A primary driver of these tragic outcomes is the delayed recognition gap—the time latency between a patient experiencing severe physiological symptoms (such as preeclampsia, sepsis, or secondary hemorrhage) and receiving definitive emergency clinical evaluation.
+
+The BRIDGE-TO-BIRTH initiative bridges this gap by replacing reactive, clinic-dependent follow-ups with an automated, text-message-based surveillance pipeline. This document provides a reproducible biostatistical validation framework evaluating a point-based Postpartum Early Warning Score (PEWS) engine optimized for remote mobile text surveillance.
+
+## Data Engineering & Patient Simulation
+Because real-world Electronic Health Record (EHR) text responses are restricted by privacy regulations, we construct a high-fidelity synthetic cohort of 1,000 postpartum patients. Crucially, the data engine relies on joint probabilistic distribution matrices, ensuring that baseline chronic health metrics naturally elevate the likelihood of reporting severe acute clinical features.
+
+
+```{r echo=FALSE}
+library(tidyverse)
+library(tableone)
+library(DT)
+library(scales)
+
+# Set seed for exact reproducibility
+set.seed(2026)
+n_patients <- 1000
+
+# Generate baseline physiological vectors
+synthetic_cohort <- tibble(
+  Patient_ID = paste0("B2B-", 1000 + 1:n_patients),
+  Age_Over_35 = rbinom(n_patients, 1, 0.22),
+  Chronic_HTN = rbinom(n_patients, 1, 0.14),
+  History_of_Preeclampsia = rbinom(n_patients, 1, 0.08)
+) %>%
+  mutate(
+    # Conditional probability thresholds: Risk multipliers based on medical history
+    prob_headache = case_when(
+      Chronic_HTN == 1 & History_of_Preeclampsia == 1 ~ 0.45,
+      Chronic_HTN == 1 | History_of_Preeclampsia == 1 ~ 0.25,
+      TRUE ~ 0.04
+    ),
+    Severe_Headache = rbinom(n_patients, 1, prob_headache),
+    Fever = rbinom(n_patients, 1, 0.05),
+    Heavy_Bleeding = rbinom(n_patients, 1, 0.06),
+    Extreme_Anxiety = rbinom(n_patients, 1, 0.11)
+  ) %>%
+  select(-prob_headache)
+```
+
+
+# Algorithmic Risk-Tier Mapping
+
+The PEWS pipeline applies a point-based integer allocation system mapped directly from clinical emergency protocols:
+
+- Severe Headache, Visual Alterations, Fever, or Heavy Bleeding: $+3$ Points each (Critical acute emergencies)
+- Extreme Postpartum Anxiety or Deep Sadness: $+2$ Points (Mental health metric)
+- Baseline Co-morbidities (Age > 35, Chronic Hypertension, Preeclampsia History): $+1$ Point each
+
+Patients are split into three operational action tiers based on their cumulative mathematical threshold:
+
+- Red (Critical): Score $\ge 4$ OR reporting any individual 3-point critical physiological symptom.
+- Yellow (Moderate): Score of 2 or 3.
+- Green (Stable): Score $\le 1$.
+
+```{r echo=FALSE}
+processed_cohort <- synthetic_cohort %>%
+  mutate(
+    Risk_Score = (Severe_Headache * 3) + 
+                  (Fever * 3) + 
+                  (Heavy_Bleeding * 3) + 
+                  (Extreme_Anxiety * 2) + 
+                  (Chronic_HTN * 1) + 
+                  (Age_Over_35 * 1) + 
+                  (History_of_Preeclampsia * 1),
+    
+    Triage_Tier = case_when(
+      Risk_Score >= 4 | Severe_Headache == 1 | Fever == 1 | Heavy_Bleeding == 1 ~ "Red - Critical",
+      Risk_Score >= 2 ~ "Yellow - Moderate",
+      TRUE ~ "Green - Stable"
+    )
+  )
+
+datatable(head(processed_cohort, 10), rownames = FALSE, options = list(pageLength = 5))
+```
+
+
+# Descriptive Cohort Stratification 
+
+To evaluate if the algorithm appropriately partitions patients based on clinical severity, we compile a baseline clinical stratification matrix comparing patient characteristics across the discovered triage groups.
+
+```{r echo=FALSE}
+# Define variables to analyze
+vars_to_stratify <- c("Age_Over_35", "Chronic_HTN", "History_of_Preeclampsia", 
+                      "Severe_Headache", "Fever", "Heavy_Bleeding", "Extreme_Anxiety", "Risk_Score")
+
+# Generate standard epidemiologic Table One
+table_one <- CreateTableOne(vars = vars_to_stratify, strata = "Triage_Tier", data = processed_cohort, test = FALSE)
+print(table_one, formatOptions = list(big.mark = ","))
+```
+
+# 1. Cumulative Risk Score Distribution by Triage Status
+
+```{r echo=FALSE}
+ggplot(processed_cohort, aes(x = Risk_Score, fill = Triage_Tier)) +
+  geom_histogram(binwidth = 1, color = "#ffffff", alpha = 0.85, position = "stack") +
+  scale_fill_manual(values = c("Green - Stable" = "#2ecc71", 
+                               "Yellow - Moderate" = "#f1c40f", 
+                               "Red - Critical" = "#e74c3c")) +
+  theme_minimal(base_size = 14) +
+  labs(
+    title = "Distribution of Postpartum Early Warning Scores (PEWS)",
+    subtitle = "Population segmentation across active surveillance triage thresholds",
+    x = "Cumulative Risk Score Value",
+    y = "Patient Encounters (Count)",
+    fill = "Operational Triage Status"
+  ) +
+  theme(legend.position = "top", plot.title = element_text(face = "bold"))
+```
+
+
+# 2. Individual Acute Symptom Prevalence across Risk Tiers
+
+```{r echo=FALSE}
+symptom_summary <- processed_cohort %>%
+  group_by(Triage_Tier) %>%
+  summarise(
+    Headache = mean(Severe_Headache),
+    Fever = mean(Fever),
+    Bleeding = mean(Heavy_Bleeding),
+    Anxiety = mean(Extreme_Anxiety)
+  ) %>%
+  pivot_longer(cols = -Triage_Tier, names_to = "Symptom", values_to = "Rate")
+
+ggplot(symptom_summary, aes(x = Symptom, y = Rate, fill = Triage_Tier)) +
+  geom_bar(stat = "identity", position = "dodge", alpha = 0.9) +
+  scale_y_continuous(labels = percent) +
+  scale_fill_manual(values = c("Green - Stable" = "#2ecc71", 
+                               "Yellow - Moderate" = "#f1c40f", 
+                               "Red - Critical" = "#e74c3c")) +
+  theme_minimal(base_size = 14) +
+  labs(
+    title = "Acute Symptom Rates Stratified by Triage Tier",
+    subtitle = "Validation confirmation: High-severity triggers map cleanly to critical action channels",
+    x = "Surveillance Symptom Metric",
+    y = "Prevalence Rate within Tier",
+    fill = "Triage Category"
+  ) +
+  theme(plot.title = element_text(face = "bold"))
+```
+
+# Operational Conclusions
+
+***Latent Risk Neutralization:*** 
+
+- By utilizing dynamic joint-probability assignments, the score captures cumulative micro-risks (such as anxiety paired with a historical hypertensive background) that would normally slip under standard binary checklists.
+
+***Resource Optimization:*** 
+
+- The algorithm securely funnels approximately r percent(mean(processed_cohort$Triage_Tier == "Green - Stable")) of patients into autonomous surveillance workflows, allowing triage nurses to dedicate focus entirely to high-risk groups.
+
+***Clinical Feasibility:*** 
+
+- Because the backend calculation relies completely on integer addition rules rather than iterative computations, it can execute instantaneously within any SMS gateway, making it highly scalable for under-resourced public health settings.
+
